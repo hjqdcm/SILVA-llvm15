@@ -30,7 +30,7 @@ Run the following command to perform incremental pointer analysis：
     -is-new=true \
     -irdiff \
     -relapath=true \
-    path/to/new/version/bc/file/newVersion.bc >
+    path/to/new/version/bc/file/newVersion.bc 
 ```
 
 Run the following command to perform incremental value-flow analysis：
@@ -40,7 +40,7 @@ Run the following command to perform incremental value-flow analysis：
     -beforecpp=path/to/old/version/dir \
     -aftercpp=path/to/new/version/dir \
     -iander \
-    -svfg
+    -svfg \
     -is-new=true \
     -irdiff \
     -relapath=true \
@@ -72,7 +72,7 @@ To run incremental value-flow analysis, use the following command:
     -beforecpp=./oldDir \
     -aftercpp=./newDir \
     -iander \
-    -svfg
+    -svfg \
     -is-new=true \
     -irdiff \
     -relapath=true \
