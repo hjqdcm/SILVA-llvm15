@@ -23,3 +23,22 @@ doxygen/
 cmake-build-debug/
 compile_commands.json
 benchmark
+
+# local/editor
+.vscode/
+.idea/
+
+# build outputs
+Debug-build/
+Release-build/
+build/
+cmake-build-*/
+
+# third-party local builds
+llvm-14.0.0.obj/
+z3.obj/
+
+# logs and core dumps
+*.log
+core
+core.*
