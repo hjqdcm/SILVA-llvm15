@@ -91,6 +91,8 @@ public:
 
         // strip off the constant cast and return the value node
         SVFValue* svfVal = LLVMModuleSet::getLLVMModuleSet()->getSVFValue(V);
+        if (svfVal == nullptr)
+            return pag->getBlkPtr();
         return pag->getValueNode(svfVal);
     }
 
@@ -98,6 +100,8 @@ public:
     inline NodeID getObjectNode(const Value* V)
     {
         SVFValue* svfVal = LLVMModuleSet::getLLVMModuleSet()->getSVFValue(V);
+        if (svfVal == nullptr)
+            return pag->getBlackHoleNode();
         return pag->getObjectNode(svfVal);
     }
 

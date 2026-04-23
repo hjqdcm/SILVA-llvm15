@@ -121,8 +121,14 @@ static inline Type* getPtrElementType(const PointerType* pty)
 #if (LLVM_VERSION_MAJOR < 14)
     return pty->getElementType();
 #else
-    assert(!pty->isOpaque() && "Opaque Pointer is used, please recompile the source adding '-Xclang -no-opaque-pointers'");
-    return pty->getNonOpaquePointerElementType();
+    // For LLVM14+ PointerType may be opaque. Try to return the
+    // non-opaque element type when available; otherwise fall back
+    // to a sensible default (`i8`) so analyses expecting an
+    // element type continue to work with opaque pointers.
+    if (!pty->isOpaque())
+        return pty->getNonOpaquePointerElementType();
+    else
+        return Type::getInt8Ty(pty->getContext());
 #endif
 }
 

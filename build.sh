@@ -6,7 +6,7 @@
 # Dependencies include: build-essential libncurses5 libncurses-dev cmake zlib1g-dev
 set -e # exit on first error
 
-jobs=38
+jobs=3
 
 #########
 # VARs and Links
@@ -29,7 +29,10 @@ SourceZ3="https://github.com/Z3Prover/z3/archive/refs/tags/z3-4.8.8.zip"
 LLVMHome="llvm-14.0.0.obj"
 Z3Home="z3.obj"
 
-
+# Prefer system LLVM 15 for opaque-pointer IR compatibility.
+if [[ -z "${LLVM_DIR:-}" && -d "/usr/lib/llvm-15" ]]; then
+    export LLVM_DIR="/usr/lib/llvm-15"
+fi
 # Downloads $1 (URL) to $2 (target destination) using wget or curl,
 # depending on OS.
 # E.g. generic_download_file www.url.com/my.zip loc/my.zip

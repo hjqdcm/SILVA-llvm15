@@ -339,12 +339,16 @@ const Value* LLVMUtil::getUniqueUseViaCastInst(const Value* val)
     const PointerType * type = SVFUtil::dyn_cast<PointerType>(val->getType());
     assert(type && "this value should be a pointer type!");
     /// If type is void* (i8*) and val is only used at a bitcast instruction
-    if (IntegerType *IT = SVFUtil::dyn_cast<IntegerType>(getPtrElementType(type)))
+    // For opaque pointers, we cannot determine element type, so skip this check
+    if (!type->isOpaque())
     {
-        if (IT->getBitWidth() == 8 && val->getNumUses()==1)
+        if (IntegerType *IT = SVFUtil::dyn_cast<IntegerType>(getPtrElementType(type)))
         {
-            const Use *u = &*val->use_begin();
-            return SVFUtil::dyn_cast<BitCastInst>(u->getUser());
+            if (IT->getBitWidth() == 8 && val->getNumUses()==1)
+            {
+                const Use *u = &*val->use_begin();
+                return SVFUtil::dyn_cast<BitCastInst>(u->getUser());
+            }
         }
     }
     return nullptr;
@@ -455,16 +459,22 @@ std::vector<std::string> LLVMUtil::getFunAnnotations(const Function* fun)
 
     for (unsigned i = 0; i < ca->getNumOperands(); ++i)
     {
-        ConstantStruct *structAn = SVFUtil::dyn_cast<ConstantStruct>(ca->getOperand(i));
+        Value* entryVal = ca->op_begin()[i].get();
+        ConstantStruct *structAn = SVFUtil::dyn_cast<ConstantStruct>(entryVal);
         if (structAn == nullptr)
             continue;
 
-        ConstantExpr *expr = SVFUtil::dyn_cast<ConstantExpr>(structAn->getOperand(0));
+        if (structAn->getNumOperands() < 2)
+            continue;
+
+        Value* op0Val = structAn->op_begin()[0].get();
+        ConstantExpr *expr = SVFUtil::dyn_cast<ConstantExpr>(op0Val);
         if (expr == nullptr || expr->getOpcode() != Instruction::BitCast || expr->getOperand(0) != fun)
             continue;
 
-        ConstantExpr *note = SVFUtil::cast<ConstantExpr>(structAn->getOperand(1));
-        if (note->getOpcode() != Instruction::GetElementPtr)
+        Value* op1Val = structAn->op_begin()[1].get();
+        ConstantExpr *note = SVFUtil::dyn_cast<ConstantExpr>(op1Val);
+        if (note == nullptr || note->getOpcode() != Instruction::GetElementPtr)
             continue;
 
         GlobalVariable *annotateStr = SVFUtil::dyn_cast<GlobalVariable>(note->getOperand(0));

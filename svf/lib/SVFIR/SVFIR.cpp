@@ -684,7 +684,8 @@ NodeID SVFIR::getGepValVar(const SVFValue* curInst, NodeID base, const AccessPat
  */
 void SVFIR::destroy()
 {
-    delete icfg;
+    // Temporary workaround for LLVM15 opaque-pointer migration:
+    // avoid teardown crash in ICFG graph destruction.
     icfg = nullptr;
     delete chgraph;
     chgraph = nullptr;

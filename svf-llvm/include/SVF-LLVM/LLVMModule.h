@@ -40,6 +40,7 @@ namespace SVF
 {
 
 class SymbolTableInfo;
+class ObjTypeInference;
 
 class LLVMModuleSet
 {
@@ -66,6 +67,7 @@ private:
     static LLVMModuleSet* llvmModuleSet;
     static bool preProcessed;
     SymbolTableInfo* symInfo;
+    ObjTypeInference* typeInference;
     SVFModule* svfModule; ///< Borrowed from singleton SVFModule::svfModule
     std::unique_ptr<LLVMContext> cxts;
     std::vector<std::unique_ptr<Module>> owned_modules;
@@ -96,7 +98,7 @@ private:
     void build();
 
 public:
-    ~LLVMModuleSet() = default;
+    ~LLVMModuleSet();
 
     static inline LLVMModuleSet* getLLVMModuleSet()
     {
@@ -117,6 +119,11 @@ public:
     inline SVFModule* getSVFModule()
     {
         return svfModule;
+    }
+
+    inline ObjTypeInference* getTypeInference()
+    {
+        return typeInference;
     }
 
     static void preProcessBCs(std::vector<std::string>& moduleNameVec);

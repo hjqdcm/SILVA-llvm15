@@ -88,9 +88,23 @@ install(
   FILES_MATCHING
   PATTERN "**/*.h")
 
-# Compile extapi.c to extapi.bc
-find_path(LLVM_CLANG_DIR NAMES clang PATH_SUFFIXES bin)
+# Compile extapi.c to extapi.bc.
+# Always use the clang bundled with the selected LLVM installation to keep
+# extapi IR syntax compatible with the LLVM parser used by SVF.
+set(SVF_EXTAPI_CLANG "${LLVM_TOOLS_BINARY_DIR}/clang")
+if(NOT EXISTS "${SVF_EXTAPI_CLANG}")
+  get_filename_component(LLVM_CMAKE_DIR_ABS "${LLVM_DIR}" ABSOLUTE)
+  get_filename_component(LLVM_PREFIX_DIR "${LLVM_CMAKE_DIR_ABS}" DIRECTORY)
+  if(EXISTS "${LLVM_PREFIX_DIR}/bin/clang-${LLVM_VERSION_MAJOR}")
+    set(SVF_EXTAPI_CLANG "${LLVM_PREFIX_DIR}/bin/clang-${LLVM_VERSION_MAJOR}")
+  else()
+    set(SVF_EXTAPI_CLANG "${LLVM_PREFIX_DIR}/bin/clang")
+  endif()
+endif()
+if(NOT EXISTS "${SVF_EXTAPI_CLANG}")
+  set(SVF_EXTAPI_CLANG clang)
+endif()
 add_custom_target(extapi_ir ALL
-    COMMAND ${LLVM_CLANG_DIR}/clang -w -S -c -Xclang -disable-O0-optnone -fno-discard-value-names -emit-llvm ${PROJECT_SOURCE_DIR}/svf-llvm/lib/extapi.c -o ${PROJECT_BINARY_DIR}/svf-llvm/extapi.bc
+    COMMAND ${SVF_EXTAPI_CLANG} -w -S -c -Xclang -disable-O0-optnone -fno-discard-value-names -emit-llvm ${PROJECT_SOURCE_DIR}/svf-llvm/lib/extapi.c -o ${PROJECT_BINARY_DIR}/svf-llvm/extapi.bc
     DEPENDS ${PROJECT_SOURCE_DIR}/svf-llvm/lib/extapi.c
 )

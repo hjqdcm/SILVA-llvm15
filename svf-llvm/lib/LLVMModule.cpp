@@ -34,6 +34,7 @@
 #include "SVF-LLVM/BasicTypes.h"
 #include "SVF-LLVM/LLVMUtil.h"
 #include "SVF-LLVM/BreakConstantExpr.h"
+#include "SVF-LLVM/ObjTypeInference.h"
 #include "SVF-LLVM/SymbolTableBuilder.h"
 #include "MSSA/SVFGBuilder.h"
 #include "llvm/Support/FileSystem.h"
@@ -73,8 +74,15 @@ bool LLVMModuleSet::preProcessed = false;
 
 LLVMModuleSet::LLVMModuleSet()
     : symInfo(SymbolTableInfo::SymbolInfo()),
+      typeInference(new ObjTypeInference()),
       svfModule(SVFModule::getSVFModule()), cxts(nullptr)
 {
+}
+
+LLVMModuleSet::~LLVMModuleSet()
+{
+    delete typeInference;
+    typeInference = nullptr;
 }
 
 SVFModule* LLVMModuleSet::buildSVFModule(Module &mod)
@@ -291,7 +299,10 @@ void LLVMModuleSet::initSVFFunction()
         /// Function
         for (const Function& f : mod.functions())
         {
-            SVFFunction* svffun = getSVFFunction(&f);
+            auto fit = LLVMFunc2SVFFunc.find(&f);
+            if (fit == LLVMFunc2SVFFunc.end())
+                continue;
+            SVFFunction* svffun = fit->second;
             initSVFBasicBlock(&f);
 
             if (!SVFUtil::isExtCall(svffun))
@@ -329,8 +340,11 @@ void LLVMModuleSet::initSVFBasicBlock(const Function* func)
                 if (const Function* called_llvmfunc = SVFUtil::dyn_cast<Function>(called_llvmval))
                 {
                     const Function* llvmfunc_def = LLVMUtil::getDefFunForMultipleModule(called_llvmfunc);
-                    SVFFunction* callee = getSVFFunction(llvmfunc_def);
-                    svfcall->setCalledOperand(callee);
+                    auto fit = LLVMFunc2SVFFunc.find(llvmfunc_def);
+                    if (fit != LLVMFunc2SVFFunc.end())
+                        svfcall->setCalledOperand(fit->second);
+                    else
+                        svfcall->setCalledOperand(getSVFValue(called_llvmval));
                 }
                 else
                 {
@@ -1054,7 +1068,10 @@ void LLVMModuleSet::setValueAttr(const Value* val, SVFValue* svfvalue)
         const Function* func = SVFUtil::cast<Function>(val);
         svffun->setIsNotRet(LLVMUtil::functionDoesNotRet(func));
         svffun->setIsUncalledFunction(LLVMUtil::isUncalledFunction(func));
-        svffun->setDefFunForMultipleModule(getSVFFunction(LLVMUtil::getDefFunForMultipleModule(func)));
+        const Function* defFun = LLVMUtil::getDefFunForMultipleModule(func);
+        auto it = LLVMFunc2SVFFunc.find(defFun);
+        if (it != LLVMFunc2SVFFunc.end())
+            svffun->setDefFunForMultipleModule(it->second);
     }
 
     svfvalue->setSourceLoc(LLVMUtil::getSourceLoc(val));
@@ -1071,17 +1088,26 @@ SVFConstantData* LLVMModuleSet::getSVFConstantData(const ConstantData* cd)
     else
     {
         SVFConstantData* svfcd = nullptr;
+        const Type* cTy = cd->getType();
+        if (cTy == nullptr || reinterpret_cast<uintptr_t>(cTy) < 0x1000)
+            cTy = Type::getInt8Ty(getContext());
         if(const ConstantInt* cint = SVFUtil::dyn_cast<ConstantInt>(cd))
         {
-            /// bitwidth == 1 : cint has value from getZExtValue() because `bool true` will be translated to -1 using sign extension (i.e., getSExtValue).
-            /// bitwidth <=64 1 : cint has value from getSExtValue()
-            /// bitwidth >64 1 : cint has value 0 because it represents an invalid int
-            if(cint->getBitWidth() == 1)
-                svfcd = new SVFConstantInt(getSVFType(cint->getType()), cint->getZExtValue(), cint->getZExtValue());
-            else if(cint->getBitWidth() <= 64 && cint->getBitWidth() > 1)
-                svfcd = new SVFConstantInt(getSVFType(cint->getType()), cint->getZExtValue(), cint->getSExtValue());
+            const llvm::APInt& ap = cint->getValue();
+            const unsigned bitWidth = ap.getBitWidth();
+            if (bitWidth == 0 || bitWidth > 64)
+            {
+                svfcd = new SVFConstantInt(getSVFType(cTy), 0, 0);
+            }
+            else if (bitWidth == 1)
+            {
+                const u64_t z = ap.getZExtValue();
+                svfcd = new SVFConstantInt(getSVFType(cTy), z, z);
+            }
             else
-                svfcd = new SVFConstantInt(getSVFType(cint->getType()), 0, 0);
+            {
+                svfcd = new SVFConstantInt(getSVFType(cTy), ap.getZExtValue(), ap.getSExtValue());
+            }
         }
         else if(const ConstantFP* cfp = SVFUtil::dyn_cast<ConstantFP>(cd))
         {
@@ -1089,14 +1115,14 @@ SVFConstantData* LLVMModuleSet::getSVFConstantData(const ConstantData* cd)
             // TODO: Why only double is considered? What about float?
             if(cfp->isNormalFP() &&  (&cfp->getValueAPF().getSemantics()== &llvm::APFloatBase::IEEEdouble()))
                 dval =  cfp->getValueAPF().convertToDouble();
-            svfcd = new SVFConstantFP(getSVFType(cd->getType()), dval);
+            svfcd = new SVFConstantFP(getSVFType(cTy), dval);
         }
         else if(SVFUtil::isa<ConstantPointerNull>(cd))
-            svfcd = new SVFConstantNullPtr(getSVFType(cd->getType()));
+            svfcd = new SVFConstantNullPtr(getSVFType(cTy));
         else if (SVFUtil::isa<UndefValue>(cd))
-            svfcd = new SVFBlackHoleValue(getSVFType(cd->getType()));
+            svfcd = new SVFBlackHoleValue(getSVFType(cTy));
         else
-            svfcd = new SVFConstantData(getSVFType(cd->getType()));
+            svfcd = new SVFConstantData(getSVFType(cTy));
 
         if (cd->hasName())
             svfcd->setName(cd->getName().str());
@@ -1145,7 +1171,13 @@ SVFOtherValue* LLVMModuleSet::getSVFOtherValue(const Value* ov)
 SVFValue* LLVMModuleSet::getSVFValue(const Value* value)
 {
     if (const Function* fun = SVFUtil::dyn_cast<Function>(value))
-        return getSVFFunction(fun);
+    {
+        auto it = LLVMFunc2SVFFunc.find(fun);
+        if (it != LLVMFunc2SVFFunc.end())
+            return it->second;
+        // Keep callers robust when a function declaration is not materialized.
+        return nullptr;
+    }
     else if (const BasicBlock* bb = SVFUtil::dyn_cast<BasicBlock>(value))
         return getSVFBasicBlock(bb);
     else if(const Instruction* inst = SVFUtil::dyn_cast<Instruction>(value))
@@ -1157,7 +1189,12 @@ SVFValue* LLVMModuleSet::getSVFValue(const Value* value)
         if (const ConstantData* cd = SVFUtil::dyn_cast<ConstantData>(cons))
             return getSVFConstantData(cd);
         else if (const GlobalValue* glob = SVFUtil::dyn_cast<GlobalValue>(cons))
-            return getSVFGlobalValue(glob);
+        {
+            auto it = LLVMConst2SVFConst.find(glob);
+            if (it != LLVMConst2SVFConst.end() && SVFUtil::isa<SVFGlobalValue>(it->second))
+                return it->second;
+            return getSVFOtherValue(value);
+        }
         else
             return getOtherSVFConstant(cons);
     }
@@ -1181,7 +1218,8 @@ const Type* LLVMModuleSet::getLLVMType(const SVFType* T) const
  */
 SVFType* LLVMModuleSet::getSVFType(const Type* T)
 {
-    assert(T && "SVFType should not be null");
+    if (T == nullptr || reinterpret_cast<uintptr_t>(T) < 0x1000)
+        T = Type::getInt8Ty(getContext());
     LLVMType2SVFTypeMap::const_iterator it = LLVMType2SVFType.find(T);
     if (it != LLVMType2SVFType.end())
         return it->second;
@@ -1265,10 +1303,10 @@ SVFType* LLVMModuleSet::addSVFTypeInfo(const Type* T)
     }
     else
     {
-        std::string buffer;
         auto ot = new SVFOtherType(T->isSingleValueType());
-        llvm::raw_string_ostream(buffer) << *T;
-        ot->setRepr(std::move(buffer));
+        // Avoid pretty-printing unknown/target-extension LLVM types here.
+        // Under opaque-pointer mode this can crash for some special constants.
+        ot->setRepr("<opaque-or-unsupported-type>");
         svftype = ot;
     }
 

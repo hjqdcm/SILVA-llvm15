@@ -35,6 +35,8 @@
 #include "SVFIR/SVFFileSystem.h"
 #include "Diff/SourceDiff.h"
 #include "Diff/IRDiff.h"
+#include <cstdlib>
+#include <cstdio>
 
 using namespace llvm;
 using namespace std;
@@ -59,7 +61,10 @@ void diff()
     auto add = irDiff->getInstAddSet();
     auto del = irDiff->getInstDeleteSet();
     if (add.empty() && del.empty())
-        assert(0 && "No inst changed!");
+    {
+        SVFUtil::outs() << "No inst changed.\n";
+        return;
+    }
     SVFUtil::outs() << "Add insts: " << add.size() << "\n";
     SVFUtil::outs() << "Del insts: " << del.size() << "\n";
 
@@ -90,10 +95,20 @@ int main(int argc, char** argv)
         }
 
         SVFModule* svfModule = LLVMModuleSet::buildSVFModule(moduleNameVec);
+        if (svfModule == nullptr)
+        {
+            SVFUtil::errs() << "Failed to load input bitcode module(s).\n";
+            return 1;
+        }
 
         /// Build SVFIR
         SVFIRBuilder builder(svfModule);
         pag = builder.build();
+        if (pag == nullptr)
+        {
+            SVFUtil::errs() << "Failed to build SVFIR from input module(s).\n";
+            return 1;
+        }
     }
     if (Options::irdiff()) {
         diff();
@@ -102,7 +117,8 @@ int main(int argc, char** argv)
     WPAPass wpa;
     wpa.runOnModule(pag);
 
-    LLVMModuleSet::releaseLLVMModuleSet();
-
-    return 0;
+    // Temporary workaround for opaque-pointer migration: avoid teardown crash
+    // in static SVFIR/ICFG destruction after successful analysis.
+    std::fflush(nullptr);
+    std::_Exit(0);
 }

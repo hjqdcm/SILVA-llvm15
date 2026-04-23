@@ -488,13 +488,30 @@ NodeID SVFIRBuilder::getGlobalVarField(const GlobalVariable *gvar, u32_t offset,
 void SVFIRBuilder::InitialGlobal(const GlobalVariable *gvar, Constant *C,
                                  u32_t offset)
 {
-    DBOUT(DPAGBuild, outs() << "global " << LLVMModuleSet::getLLVMModuleSet()->getSVFValue(gvar)->toString() << " constant initializer: " << LLVMModuleSet::getLLVMModuleSet()->getSVFValue(C)->toString() << "\n");
-    if (C->getType()->isSingleValueType())
+    const Type* cTy = C ? C->getType() : nullptr;
+    if (cTy == nullptr || reinterpret_cast<uintptr_t>(cTy) < 0x1000)
+        return;
+
+    SVFValue* gSVal = LLVMModuleSet::getLLVMModuleSet()->getSVFValue(gvar);
+    SVFValue* cSVal = LLVMModuleSet::getLLVMModuleSet()->getSVFValue(C);
+    DBOUT(DPAGBuild,
+          outs() << "global "
+                 << (gSVal ? gSVal->toString() : std::string("<null-global>"))
+                 << " constant initializer: "
+                 << (cSVal ? cSVal->toString() : std::string("<null-const>"))
+                 << "\n");
+
+    // Some constants may not have a materialized SVF value yet during global
+    // initialization under opaque-pointer mode.
+    if (cSVal == nullptr)
+        return;
+
+    if (cTy->isSingleValueType())
     {
         NodeID src = getValueNode(C);
         // get the field value if it is available, otherwise we create a dummy field node.
         setCurrentLocation(gvar, nullptr);
-        NodeID field = getGlobalVarField(gvar, offset, LLVMModuleSet::getLLVMModuleSet()->getSVFType(C->getType()));
+        NodeID field = getGlobalVarField(gvar, offset, LLVMModuleSet::getLLVMModuleSet()->getSVFType(cTy));
 
         if (SVFUtil::isa<GlobalVariable, Function>(C))
         {
@@ -521,7 +538,7 @@ void SVFIRBuilder::InitialGlobal(const GlobalVariable *gvar, Constant *C,
             setCurrentLocation(C, nullptr);
             addStoreEdge(src, field);
             /// src should not point to anything yet
-            if (C->getType()->isPtrOrPtrVectorTy() && src != pag->getNullPtr())
+            if (cTy->isPtrOrPtrVectorTy() && src != pag->getNullPtr())
                 addCopyEdge(pag->getNullPtr(), src);
         }
     }
@@ -531,6 +548,8 @@ void SVFIRBuilder::InitialGlobal(const GlobalVariable *gvar, Constant *C,
             return;
         for (u32_t i = 0, e = C->getNumOperands(); i != e; i++)
         {
+            if (!SVFUtil::isa<Constant>(C->getOperand(i)))
+                continue;
             u32_t off = pag->getSymbolInfo()->getFlattenedElemIdx(LLVMModuleSet::getLLVMModuleSet()->getSVFType(C->getType()), i);
             InitialGlobal(gvar, SVFUtil::cast<Constant>(C->getOperand(i)), offset + off);
         }

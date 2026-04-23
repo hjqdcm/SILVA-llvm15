@@ -35,6 +35,7 @@
 #include "SVFIR/SVFModule.h"
 #include "Util/SVFUtil.h"
 #include "SVF-LLVM/BasicTypes.h"
+#include "SVF-LLVM/ObjTypeInference.h"
 #include "SVF-LLVM/LLVMUtil.h"
 #include "Util/CppUtil.h"
 #include "SVF-LLVM/GEPTypeBridgeIterator.h" // include bridge_gep_iterator
@@ -292,12 +293,14 @@ void SymbolTableBuilder::collectVal(const Value* val)
     {
         return;
     }
-    SymbolTableInfo::ValueToIDMapTy::iterator iter = symInfo->valSymMap.find(
-                LLVMModuleSet::getLLVMModuleSet()->getSVFValue(val));
+    SVFValue* svfVal = LLVMModuleSet::getLLVMModuleSet()->getSVFValue(val);
+    if (svfVal == nullptr)
+        return;
+
+    SymbolTableInfo::ValueToIDMapTy::iterator iter = symInfo->valSymMap.find(svfVal);
     if (iter == symInfo->valSymMap.end())
     {
         // create val sym and sym type
-        SVFValue* svfVal = LLVMModuleSet::getLLVMModuleSet()->getSVFValue(val);
         SymID id = NodeIDAllocator::get()->allocateValueId();
         symInfo->valSymMap.insert(std::make_pair(svfVal, id));
         DBOUT(DMemModel,
@@ -517,30 +520,30 @@ void SymbolTableBuilder::handleGlobalCE(const GlobalVariable* G)
  */
 void SymbolTableBuilder::handleGlobalInitializerCE(const Constant* C)
 {
+    if (C == nullptr)
+        return;
+    const Type* cTy = C->getType();
+    if (cTy == nullptr || reinterpret_cast<uintptr_t>(cTy) < 0x1000)
+        return;
 
-    if (C->getType()->isSingleValueType())
-    {
-        if (const ConstantExpr* E = SVFUtil::dyn_cast<ConstantExpr>(C))
-        {
-            handleCE(E);
-        }
-        else
-        {
-            collectVal(C);
-        }
-    }
-    else if (SVFUtil::isa<ConstantArray>(C))
+    if (SVFUtil::isa<Function>(C))
+        return;
+
+    // In opaque-pointer mode, avoid querying type eagerly here.
+    if (SVFUtil::isa<ConstantArray>(C))
     {
         for (u32_t i = 0, e = C->getNumOperands(); i != e; i++)
         {
-            handleGlobalInitializerCE(SVFUtil::cast<Constant>(C->getOperand(i)));
+            if (const Constant* op = SVFUtil::dyn_cast<Constant>(C->getOperand(i)))
+                handleGlobalInitializerCE(op);
         }
     }
     else if (SVFUtil::isa<ConstantStruct>(C))
     {
         for (u32_t i = 0, e = C->getNumOperands(); i != e; i++)
         {
-            handleGlobalInitializerCE(SVFUtil::cast<Constant>(C->getOperand(i)));
+            if (const Constant* op = SVFUtil::dyn_cast<Constant>(C->getOperand(i)))
+                handleGlobalInitializerCE(op);
         }
     }
     else if(const ConstantData* data = SVFUtil::dyn_cast<ConstantData>(C))
@@ -564,6 +567,14 @@ void SymbolTableBuilder::handleGlobalInitializerCE(const Constant* C)
             }
         }
     }
+    else if (const ConstantExpr* E = SVFUtil::dyn_cast<ConstantExpr>(C))
+    {
+        handleCE(E);
+    }
+    else if (cTy->isSingleValueType())
+    {
+        collectVal(C);
+    }
     else
     {
         //TODO:assert(SVFUtil::isa<ConstantVector>(C),"what else do we have");
@@ -576,6 +587,8 @@ void SymbolTableBuilder::handleGlobalInitializerCE(const Constant* C)
 ObjTypeInfo* SymbolTableBuilder::createObjTypeInfo(const Value* val)
 {
     const PointerType* refTy = nullptr;
+    LLVMModuleSet* llvmModuleSet = LLVMModuleSet::getLLVMModuleSet();
+    ObjTypeInference* typeInference = llvmModuleSet->getTypeInference();
 
     const Instruction* I = SVFUtil::dyn_cast<Instruction>(val);
 
@@ -591,9 +604,18 @@ ObjTypeInfo* SymbolTableBuilder::createObjTypeInfo(const Value* val)
 
     if (refTy)
     {
-        Type* objTy = getPtrElementType(refTy);
+        Type* objTy = nullptr;
+        // In opaque-pointer mode, pointee type can be missing. Prefer inferred type.
+        if (typeInference)
+        {
+            objTy = const_cast<Type*>(typeInference->inferObjType(val));
+        }
+        if (objTy == nullptr)
+        {
+            objTy = getPtrElementType(refTy);
+        }
         ObjTypeInfo* typeInfo = new ObjTypeInfo(
-            LLVMModuleSet::getLLVMModuleSet()->getSVFType(objTy),
+            llvmModuleSet->getSVFType(objTy),
             Options::MaxFieldLimit());
         initTypeInfo(typeInfo,val, objTy);
         return typeInfo;

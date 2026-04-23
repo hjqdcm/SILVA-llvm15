@@ -47,6 +47,8 @@ endif()
 
 # SVF-LLVM contains LLVM Libs
 file(GLOB SVFLLVM_SOURCES lib/*.cpp lib/Diff/*.cpp)
+# Ensure newly added source is linked in incremental builds.
+list(APPEND SVFLLVM_SOURCES lib/ObjTypeInference.cpp)
 
 add_llvm_library(SvfLLVM STATIC ${SVFLLVM_SOURCES})
 target_include_directories(SvfLLVM SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})

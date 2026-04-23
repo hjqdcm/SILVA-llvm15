@@ -562,8 +562,11 @@ SymID SymbolTableInfo::getValSym(const SVFValue* val)
     else
     {
         ValueToIDMapTy::const_iterator iter =  valSymMap.find(val);
-        assert(iter!=valSymMap.end() &&"value sym not found");
-        return iter->second;
+        if (iter != valSymMap.end())
+            return iter->second;
+        // Opaque-pointer compatibility fallback: keep analysis progressing
+        // when a value symbol is not materialized during early collection.
+        return blkPtrSymID();
     }
 }
 

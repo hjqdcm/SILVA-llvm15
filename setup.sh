@@ -17,6 +17,10 @@ function set_llvm {
     # LLVM_DIR already set
     [[ -n "$LLVM_DIR" ]] && return 0
 
+    # prefer system LLVM 15 for opaque-pointer bitcode
+    LLVM_DIR="/usr/lib/llvm-15"
+    [[ -d "$LLVM_DIR" ]] && return 0
+
     # use local download directory
     LLVM_DIR="$SVF_DIR/llvm-14.0.0.obj"
     [[ -d "$LLVM_DIR" ]] && return 0
