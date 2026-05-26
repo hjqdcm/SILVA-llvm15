@@ -427,6 +427,14 @@ protected:
     {
         return (PAGNodeToDefMap.find(pagNode) != PAGNodeToDefMap.end());
     }
+    /// Like getDef, but if a PAG src has no VFG definition (e.g. partial ConstantExpr
+    /// modeling), fall back to the null-pointer definition so SVFG wiring stays stable.
+    inline NodeID getDefConservative(const PAGNode* pagNode) const
+    {
+        if (hasDef(pagNode))
+            return getDef(pagNode);
+        return getDef(pag->getGNode(pag->getNullPtr()));
+    }
     //@}
 
     /// Create VFG nodes

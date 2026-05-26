@@ -301,14 +301,16 @@ void FlowSensitiveStat::statNullPtr()
                     {
                         _NumOfNullPtr++;
                         rawstr << "##Null Pointer : (NodeID " << pagNode->getId()
-                               << ") PtrName:" << pagNode->getValue()->getName();
+                               << ") PtrName:" << pagNode->getValue()->getName()
+                               << " Src:" << pagNode->getValue()->getSourceLoc();
                         writeWrnMsg(rawstr.str());
                     }
                 }
                 else
                 {
                     _NumOfNullPtr++;
-                    rawstr << "##Null Pointer : (NodeID " << pagNode->getId();
+                    rawstr << "##Null Pointer : (NodeID " << pagNode->getId()
+                           << ") Src:" << pagNode->getValue()->getSourceLoc();
                     writeWrnMsg(rawstr.str());
                 }
             }

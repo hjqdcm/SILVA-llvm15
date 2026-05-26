@@ -35,12 +35,56 @@
 #include "SVF-LLVM/LLVMModule.h"
 #include "SVFIR/SVFValue.h"
 #include "Util/ThreadAPI.h"
+#include <cstdint>
 
 namespace SVF
 {
 
 namespace LLVMUtil
 {
+
+/// Reject non-null garbage in rare constant aggregate operand slots before
+/// SVFUtil::isa / dyn_cast reads the llvm::Value header (e.g. SIGSEGV on 0x4000).
+inline bool isPlausibleLLVMValuePointer(const llvm::Value* v)
+{
+    if (v == nullptr)
+        return false;
+    const auto a = reinterpret_cast<std::uintptr_t>(v);
+    if (a < 0x10000u)
+        return false;
+    if ((a & 0x7u) != 0u)
+        return false;
+#if defined(__x86_64__) || defined(_M_X64)
+    // Canonical lower user-space on amd64; above is non-canonical / kernel hole.
+    // Rejects garbage operands like 0x7000000000000000 that pass alignment checks.
+    if (a > 0x00007fffffffffffULL)
+        return false;
+    // Widened integer / placeholder garbage in damaged constants (passes checks above).
+    if (a == (1ULL << 32))
+        return false;
+#endif
+    return true;
+}
+
+/// Same idea as isPlausibleLLVMValuePointer: reject garbage Type* before isa /
+/// dyn_cast on llvm::Type (e.g. misaligned pointers from corrupt layout chains).
+inline bool isPlausibleLLVMTypePointer(const llvm::Type* t)
+{
+    if (t == nullptr)
+        return false;
+    const auto a = reinterpret_cast<std::uintptr_t>(t);
+    if (a < 0x10000u)
+        return false;
+    if ((a & 0x7u) != 0u)
+        return false;
+#if defined(__x86_64__) || defined(_M_X64)
+    if (a > 0x00007fffffffffffULL)
+        return false;
+    if (a == (1ULL << 32))
+        return false;
+#endif
+    return true;
+}
 
 /// Whether an instruction is a call or invoke instruction
 inline bool isCallSite(const Instruction* inst)

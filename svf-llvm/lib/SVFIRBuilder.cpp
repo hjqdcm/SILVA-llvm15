@@ -337,12 +337,16 @@ bool SVFIRBuilder::computeGepOffset(const User *V, AccessPath& ap)
  */
 void SVFIRBuilder::processCE(const Value* val)
 {
+    if (!LLVMUtil::isPlausibleLLVMValuePointer(val))
+        return;
     if (const Constant* ref = SVFUtil::dyn_cast<Constant>(val))
     {
         if (const ConstantExpr* gepce = isGepConstantExpr(ref))
         {
             DBOUT(DPAGBuild, outs() << "handle gep constant expression " << LLVMModuleSet::getLLVMModuleSet()->getSVFValue(ref)->toString() << "\n");
             const Constant* opnd = gepce->getOperand(0);
+            if (!LLVMUtil::isPlausibleLLVMValuePointer(opnd))
+                return;
             // handle recursive constant express case (gep (bitcast (gep X 1)) 1)
             processCE(opnd);
             AccessPath ap;
@@ -362,6 +366,8 @@ void SVFIRBuilder::processCE(const Value* val)
         {
             DBOUT(DPAGBuild, outs() << "handle cast constant expression " << LLVMModuleSet::getLLVMModuleSet()->getSVFValue(ref)->toString() << "\n");
             const Constant* opnd = castce->getOperand(0);
+            if (!LLVMUtil::isPlausibleLLVMValuePointer(opnd))
+                return;
             processCE(opnd);
             const SVFValue* cval = getCurrentValue();
             const SVFBasicBlock* cbb = getCurrentBB();
@@ -372,14 +378,19 @@ void SVFIRBuilder::processCE(const Value* val)
         else if (const ConstantExpr* selectce = isSelectConstantExpr(ref))
         {
             DBOUT(DPAGBuild, outs() << "handle select constant expression " << LLVMModuleSet::getLLVMModuleSet()->getSVFValue(ref)->toString() << "\n");
+            const Value* vcond = selectce->getOperand(0);
             const Constant* src1 = selectce->getOperand(1);
             const Constant* src2 = selectce->getOperand(2);
+            if (!LLVMUtil::isPlausibleLLVMValuePointer(vcond)
+                || !LLVMUtil::isPlausibleLLVMValuePointer(src1)
+                || !LLVMUtil::isPlausibleLLVMValuePointer(src2))
+                return;
             processCE(src1);
             processCE(src2);
             const SVFValue* cval = getCurrentValue();
             const SVFBasicBlock* cbb = getCurrentBB();
             setCurrentLocation(selectce, nullptr);
-            NodeID cond = pag->getValueNode(LLVMModuleSet::getLLVMModuleSet()->getSVFValue(selectce->getOperand(0)));
+            NodeID cond = pag->getValueNode(LLVMModuleSet::getLLVMModuleSet()->getSVFValue(vcond));
             NodeID nsrc1 = pag->getValueNode(LLVMModuleSet::getLLVMModuleSet()->getSVFValue(src1));
             NodeID nsrc2 = pag->getValueNode(LLVMModuleSet::getLLVMModuleSet()->getSVFValue(src2));
             NodeID nres = pag->getValueNode(LLVMModuleSet::getLLVMModuleSet()->getSVFValue(selectce));
@@ -394,6 +405,8 @@ void SVFIRBuilder::processCE(const Value* val)
         else if (const ConstantExpr* ptr2Intce = isPtr2IntConstantExpr(ref))
         {
             const Constant* opnd = ptr2Intce->getOperand(0);
+            if (!LLVMUtil::isPlausibleLLVMValuePointer(opnd))
+                return;
             processCE(opnd);
             const SVFBasicBlock* cbb = getCurrentBB();
             const SVFValue* cval = getCurrentValue();
@@ -446,10 +459,36 @@ void SVFIRBuilder::processCE(const Value* val)
             addAddrEdge(pag->getConstantNode(), dst);
             setCurrentLocation(cval, cbb);
         }
-        else
+        else if (const ConstantExpr* ce = SVFUtil::dyn_cast<ConstantExpr>(ref))
         {
-            if(SVFUtil::isa<ConstantExpr>(val))
-                assert(false && "we don't handle all other constant expression for now!");
+            // CE opcodes not handled above (e.g. addrspacecast — not matched by
+            // isCastConstantExpr which only checks bitcast). Recurse operands, then
+            // approximate single-operand pointer casts as copy; otherwise black-hole.
+            const SVFValue* cval = getCurrentValue();
+            const SVFBasicBlock* cbb = getCurrentBB();
+            for (unsigned i = 0, e = ce->getNumOperands(); i != e; ++i)
+            {
+                const Value* opv = ce->getOperand(i);
+                if (!LLVMUtil::isPlausibleLLVMValuePointer(opv))
+                    continue;
+                if (const Constant* op = SVFUtil::dyn_cast<Constant>(opv))
+                    processCE(op);
+            }
+            if (ce->getType()->isPointerTy())
+            {
+                setCurrentLocation(ce, nullptr);
+                NodeID dst = pag->getValueNode(LLVMModuleSet::getLLVMModuleSet()->getSVFValue(ce));
+                const Value* op0 = ce->getNumOperands() >= 1 ? ce->getOperand(0) : nullptr;
+                if (LLVMUtil::isPlausibleLLVMValuePointer(op0) && op0->getType()->isPointerTy())
+                {
+                    addCopyEdge(
+                        pag->getValueNode(LLVMModuleSet::getLLVMModuleSet()->getSVFValue(op0)),
+                        dst);
+                }
+                else
+                    addBlackHoleAddrEdge(dst);
+                setCurrentLocation(cval, cbb);
+            }
         }
     }
 }
@@ -489,7 +528,8 @@ void SVFIRBuilder::InitialGlobal(const GlobalVariable *gvar, Constant *C,
                                  u32_t offset)
 {
     const Type* cTy = C ? C->getType() : nullptr;
-    if (cTy == nullptr || reinterpret_cast<uintptr_t>(cTy) < 0x1000)
+    if (!LLVMUtil::isPlausibleLLVMValuePointer(C) ||
+        !LLVMUtil::isPlausibleLLVMTypePointer(cTy))
         return;
 
     SVFValue* gSVal = LLVMModuleSet::getLLVMModuleSet()->getSVFValue(gvar);
@@ -544,14 +584,43 @@ void SVFIRBuilder::InitialGlobal(const GlobalVariable *gvar, Constant *C,
     }
     else if (SVFUtil::isa<ConstantArray, ConstantStruct>(C))
     {
-        if(LLVMUtil::isValVtbl(gvar) && !Options::VtableInSVFIR())
+        if (LLVMUtil::isValVtbl(gvar) && !Options::VtableInSVFIR())
             return;
-        for (u32_t i = 0, e = C->getNumOperands(); i != e; i++)
+        const Type* llvmAggTy = C->getType();
+        if (!LLVMUtil::isPlausibleLLVMTypePointer(llvmAggTy))
+            return;
+        const unsigned nOps = C->getNumOperands();
+        bool llvmLayoutOk = true;
+        if (SVFUtil::isa<ConstantArray>(C))
         {
-            if (!SVFUtil::isa<Constant>(C->getOperand(i)))
+            const auto* AT = SVFUtil::dyn_cast<ArrayType>(llvmAggTy);
+            llvmLayoutOk = AT && LLVMUtil::isPlausibleLLVMTypePointer(AT) &&
+                           AT->getNumElements() == static_cast<uint64_t>(nOps);
+        }
+        else if (SVFUtil::isa<ConstantStruct>(C))
+        {
+            const auto* ST = SVFUtil::dyn_cast<StructType>(llvmAggTy);
+            llvmLayoutOk =
+                ST && LLVMUtil::isPlausibleLLVMTypePointer(ST) &&
+                static_cast<unsigned>(ST->getNumElements()) == nOps;
+        }
+        const SVFType* layoutSvf =
+            LLVMModuleSet::getLLVMModuleSet()->getSVFType(llvmAggTy);
+        const bool useFlattened =
+            llvmLayoutOk && (Options::ModelArrays() ||
+                             SVFUtil::isa<SVFStructType, SVFArrayType>(layoutSvf));
+
+        for (u32_t i = 0; i != nOps; ++i)
+        {
+            Value* op = C->getOperand(i);
+            if (!LLVMUtil::isPlausibleLLVMValuePointer(op) ||
+                !SVFUtil::isa<Constant>(op))
                 continue;
-            u32_t off = pag->getSymbolInfo()->getFlattenedElemIdx(LLVMModuleSet::getLLVMModuleSet()->getSVFType(C->getType()), i);
-            InitialGlobal(gvar, SVFUtil::cast<Constant>(C->getOperand(i)), offset + off);
+            const u32_t off =
+                useFlattened
+                    ? pag->getSymbolInfo()->getFlattenedElemIdx(layoutSvf, i)
+                    : 0u;
+            InitialGlobal(gvar, SVFUtil::cast<Constant>(op), offset + off);
         }
     }
     else if(ConstantData* data = SVFUtil::dyn_cast<ConstantData>(C))
@@ -560,9 +629,20 @@ void SVFIRBuilder::InitialGlobal(const GlobalVariable *gvar, Constant *C,
         {
             if(ConstantDataSequential* seq = SVFUtil::dyn_cast<ConstantDataSequential>(data))
             {
+                const Type* seqTy = C->getType();
+                if (!LLVMUtil::isPlausibleLLVMTypePointer(seqTy))
+                    return;
+                const SVFType* layoutSvf =
+                    LLVMModuleSet::getLLVMModuleSet()->getSVFType(seqTy);
+                const bool useFlattened =
+                    Options::ModelArrays() ||
+                    SVFUtil::isa<SVFStructType, SVFArrayType>(layoutSvf);
                 for(u32_t i = 0; i < seq->getNumElements(); i++)
                 {
-                    u32_t off = pag->getSymbolInfo()->getFlattenedElemIdx(LLVMModuleSet::getLLVMModuleSet()->getSVFType(C->getType()), i);
+                    const u32_t off =
+                        useFlattened
+                            ? pag->getSymbolInfo()->getFlattenedElemIdx(layoutSvf, i)
+                            : 0u;
                     Constant* ct = seq->getElementAsConstant(i);
                     InitialGlobal(gvar, ct, offset + off);
                 }
@@ -1309,6 +1389,11 @@ void SVFIRBuilder::setCurrentBBAndValueForPAGEdge(PAGEdge* edge)
         {
             icfgNode = pag->getICFG()->getICFGNode(curBB->front());
         }
+    }
+    else if (SVFUtil::isa<SVFOtherValue>(curVal))
+    {
+        // Poison/undef/inlineasm and similar map to SVFOtherValue (not SVFConstant).
+        icfgNode = pag->getICFG()->getGlobalICFGNode();
     }
     else
     {

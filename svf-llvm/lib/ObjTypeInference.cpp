@@ -11,6 +11,7 @@
 #include "SVF-LLVM/LLVMModule.h"
 #include "SVF-LLVM/LLVMUtil.h"
 #include "Util/WorkList.h"
+#include "llvm/IR/GlobalVariable.h"
 
 using namespace SVF;
 using namespace SVFUtil;
@@ -29,10 +30,6 @@ static const Type* inferSiteToType(const Value* val)
     {
         return gepInst->getSourceElementType();
     }
-    if (const auto* call = SVFUtil::dyn_cast<CallBase>(val))
-    {
-        return call->getFunctionType();
-    }
     if (const auto* allocaInst = SVFUtil::dyn_cast<AllocaInst>(val))
     {
         return allocaInst->getAllocatedType();
@@ -42,6 +39,18 @@ static const Type* inferSiteToType(const Value* val)
         return globalValue->getValueType();
     }
     return nullptr;
+}
+
+/// True when `t` is no more informative than the opaque-pointer fallback.
+static bool isImpreciseObjType(const Type* t, const Value* val,
+                               LLVMContext& ctx)
+{
+    if (!t)
+        return true;
+    if (t == PointerType::getUnqual(ctx))
+        return true;
+    (void)val;
+    return false;
 }
 }
 
@@ -64,11 +73,24 @@ const Type* ObjTypeInference::selectConservativeType(Set<const Type*>& objTys)
 
 const Type* ObjTypeInference::inferObjType(const Value* var)
 {
-    // Temporary conservative mode for stability on opaque-pointer migration.
-    // We avoid complex forward/backward traversal here because it may touch
-    // values whose SVF mapping has not been fully initialized yet.
-    (void)var;
-    return defaultType(var);
+    assert(var && "inferObjType requires non-null value");
+    LLVMContext& ctx = LLVMModuleSet::getLLVMModuleSet()->getContext();
+    const Type* inferred = fwInferObjType(var);
+    if (!isImpreciseObjType(inferred, var, ctx))
+        return inferred;
+
+    Set<const Type*> allocTys;
+    for (const Value* site : bwfindAllocOfVar(var))
+    {
+        if (const auto* ai = SVFUtil::dyn_cast<AllocaInst>(site))
+            allocTys.insert(ai->getAllocatedType());
+        else if (const auto* gv = SVFUtil::dyn_cast<GlobalVariable>(site))
+            allocTys.insert(gv->getValueType());
+    }
+    if (!allocTys.empty())
+        return selectConservativeType(allocTys);
+
+    return inferred;
 }
 
 const Type* ObjTypeInference::fwInferObjType(const Value* var)
@@ -76,6 +98,20 @@ const Type* ObjTypeInference::fwInferObjType(const Value* var)
     auto it = valueToType.find(var);
     if (it != valueToType.end())
         return it->second ? it->second : defaultType(var);
+
+    // Direct sites carry precise layout types even when ptr values are opaque.
+    if (const auto* ai = SVFUtil::dyn_cast<AllocaInst>(var))
+    {
+        const Type* at = ai->getAllocatedType();
+        valueToType[var] = at;
+        return at ? at : defaultType(var);
+    }
+    if (const auto* gv = SVFUtil::dyn_cast<GlobalVariable>(var))
+    {
+        const Type* vt = gv->getValueType();
+        valueToType[var] = vt;
+        return vt ? vt : defaultType(var);
+    }
 
     FILOWorkList<ValueBoolPair> workList;
     Set<ValueBoolPair> visited;
@@ -129,13 +165,24 @@ const Type* ObjTypeInference::fwInferObjType(const Value* var)
                 if (storeInst->getPointerOperand() == curValue)
                     insertInferSite(storeInst);
             }
-            else if (const auto* bitcast = SVFUtil::dyn_cast<BitCastInst>(user))
+            else if (const auto* gepUser =
+                         SVFUtil::dyn_cast<GetElementPtrInst>(user))
             {
-                insertOrPush(bitcast);
+                insertInferSite(gepUser);
+            }
+            else if (const auto* castInst = SVFUtil::dyn_cast<CastInst>(user))
+            {
+                if (SVFUtil::isa<BitCastInst, llvm::AddrSpaceCastInst>(
+                        castInst))
+                    insertOrPush(castInst);
             }
             else if (const auto* phiNode = SVFUtil::dyn_cast<PHINode>(user))
             {
                 insertOrPush(phiNode);
+            }
+            else if (const auto* sel = SVFUtil::dyn_cast<SelectInst>(user))
+            {
+                insertOrPush(sel);
             }
             else if (const auto* callBase = SVFUtil::dyn_cast<CallBase>(user))
             {
@@ -228,10 +275,25 @@ Set<const Value*>& ObjTypeInference::bwfindAllocOfVar(const Value* var)
         {
             insertOrPush(bitcast->getOperand(0));
         }
+        else if (const auto* asc =
+                     SVFUtil::dyn_cast<llvm::AddrSpaceCastInst>(curValue))
+        {
+            insertOrPush(asc->getOperand(0));
+        }
+        else if (const auto* gepInst =
+                     SVFUtil::dyn_cast<GetElementPtrInst>(curValue))
+        {
+            insertOrPush(gepInst->getPointerOperand());
+        }
         else if (const auto* phiNode = SVFUtil::dyn_cast<PHINode>(curValue))
         {
             for (u32_t i = 0; i < phiNode->getNumOperands(); ++i)
                 insertOrPush(phiNode->getOperand(i));
+        }
+        else if (const auto* sel = SVFUtil::dyn_cast<SelectInst>(curValue))
+        {
+            insertOrPush(sel->getTrueValue());
+            insertOrPush(sel->getFalseValue());
         }
 
         if (canUpdate)

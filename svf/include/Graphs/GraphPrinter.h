@@ -70,6 +70,7 @@ public:
 
         WriteGraph(outFile, GT, simple);
         outFile.close();
+        O << "\n";
     }
 
     /*!

@@ -354,7 +354,7 @@ protected:
     }
     inline NodeID getDef(const PAGNode* pagNode) const
     {
-        return VFG::getDef(pagNode);
+        return VFG::getDefConservative(pagNode);
     }
     inline bool hasDef(const PAGNode* pagNode) const
     {

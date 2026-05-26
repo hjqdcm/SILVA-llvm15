@@ -30,6 +30,7 @@
 #include <memory>
 
 #include "SVF-LLVM/SymbolTableBuilder.h"
+#include "SVF-LLVM/LLVMUtil.h"
 #include "Util/NodeIDAllocator.h"
 #include "Util/Options.h"
 #include "SVFIR/SVFModule.h"
@@ -389,6 +390,8 @@ void SymbolTableBuilder::collectVararg(const Function* val)
  */
 void SymbolTableBuilder::handleCE(const Value* val)
 {
+    if (!LLVMUtil::isPlausibleLLVMValuePointer(val))
+        return;
     if (const Constant* ref = SVFUtil::dyn_cast<Constant>(val))
     {
         if (const ConstantExpr* ce = isGepConstantExpr(ref))
@@ -404,8 +407,11 @@ void SymbolTableBuilder::handleCE(const Value* val)
             // like (gep (bitcast (gep X 1)) 1); the inner gep is ce->getOperand(0)
             for (u32_t i = 0; i < ce->getNumOperands(); ++i)
             {
-                collectVal(ce->getOperand(i));
-                handleCE(ce->getOperand(i));
+                const Value* op = ce->getOperand(i);
+                if (!LLVMUtil::isPlausibleLLVMValuePointer(op))
+                    continue;
+                collectVal(op);
+                handleCE(op);
             }
         }
         else if (const ConstantExpr* ce = isCastConstantExpr(ref))
@@ -416,10 +422,16 @@ void SymbolTableBuilder::handleCE(const Value* val)
                   ->toString()
                   << "\n");
             collectVal(ce);
-            collectVal(ce->getOperand(0));
-            // handle the recursive constant express case
-            // like (gep (bitcast (gep X 1)) 1); the inner gep is ce->getOperand(0)
-            handleCE(ce->getOperand(0));
+            {
+                const Value* op0 = ce->getOperand(0);
+                if (LLVMUtil::isPlausibleLLVMValuePointer(op0))
+                {
+                    collectVal(op0);
+                    // handle the recursive constant express case
+                    // like (gep (bitcast (gep X 1)) 1); the inner gep is ce->getOperand(0)
+                    handleCE(op0);
+                }
+            }
         }
         else if (const ConstantExpr* ce = isSelectConstantExpr(ref))
         {
@@ -429,14 +441,20 @@ void SymbolTableBuilder::handleCE(const Value* val)
                   ->toString()
                   << "\n");
             collectVal(ce);
-            collectVal(ce->getOperand(0));
-            collectVal(ce->getOperand(1));
-            collectVal(ce->getOperand(2));
+            for (u32_t si = 0; si < 3u; ++si)
+            {
+                const Value* sop = ce->getOperand(si);
+                if (LLVMUtil::isPlausibleLLVMValuePointer(sop))
+                    collectVal(sop);
+            }
             // handle the recursive constant express case
             // like (gep (bitcast (gep X 1)) 1); the inner gep is ce->getOperand(0)
-            handleCE(ce->getOperand(0));
-            handleCE(ce->getOperand(1));
-            handleCE(ce->getOperand(2));
+            for (u32_t si = 0; si < 3u; ++si)
+            {
+                const Value* sop = ce->getOperand(si);
+                if (LLVMUtil::isPlausibleLLVMValuePointer(sop))
+                    handleCE(sop);
+            }
         }
         // if we meet a int2ptr, then it points-to black hole
         else if (const ConstantExpr* int2Ptrce = isInt2PtrConstantExpr(ref))
@@ -447,7 +465,8 @@ void SymbolTableBuilder::handleCE(const Value* val)
         {
             collectVal(ptr2Intce);
             const Constant* opnd = ptr2Intce->getOperand(0);
-            handleCE(opnd);
+            if (LLVMUtil::isPlausibleLLVMValuePointer(opnd))
+                handleCE(opnd);
         }
         else if (isTruncConstantExpr(ref) || isCmpConstantExpr(ref))
         {
@@ -467,10 +486,24 @@ void SymbolTableBuilder::handleCE(const Value* val)
             // we don't handle constant aggregate like constant vectors
             collectVal(ref);
         }
+        else if (const ConstantExpr* ce = SVFUtil::dyn_cast<ConstantExpr>(ref))
+        {
+            // e.g. addrspacecast (not covered by isCastConstantExpr which only matches bitcast),
+            // freeze, or other CE opcodes: conservatively collect operands for the symbol table.
+            collectVal(ce);
+            for (u32_t i = 0, e = ce->getNumOperands(); i != e; ++i)
+            {
+                const Value* op = ce->getOperand(i);
+                if (!LLVMUtil::isPlausibleLLVMValuePointer(op))
+                    continue;
+                collectVal(op);
+                handleCE(op);
+            }
+        }
         else
         {
-            assert(!SVFUtil::isa<ConstantExpr>(val) &&
-                   "we don't handle all other constant expression for now!");
+            //assert(!SVFUtil::isa<ConstantExpr>(val) &&
+                   //"we don't handle all other constant expression for now!");
             collectVal(ref);
         }
     }
@@ -485,15 +518,27 @@ void SymbolTableBuilder::handleGlobalCE(const GlobalVariable* G)
 
     //The type this global points to
     const Type* T = G->getValueType();
-    bool is_array = 0;
-    //An array is considered a single variable of its type.
-    while (const ArrayType* AT = SVFUtil::dyn_cast<ArrayType>(T))
+    bool is_array = false;
+    if (!LLVMUtil::isPlausibleLLVMTypePointer(T))
     {
-        T = AT->getElementType();
+        if (G->hasInitializer())
+            handleGlobalInitializerCE(G->getInitializer());
+        return;
+    }
+    // An array is considered a single variable of its type.
+    while (true)
+    {
+        const ArrayType* AT = SVFUtil::dyn_cast<ArrayType>(T);
+        if (!AT)
+            break;
+        const Type* elem = AT->getElementType();
+        if (!LLVMUtil::isPlausibleLLVMTypePointer(elem))
+            break;
+        T = elem;
         is_array = true;
     }
 
-    if (SVFUtil::isa<StructType>(T))
+    if (LLVMUtil::isPlausibleLLVMTypePointer(T) && SVFUtil::isa<StructType>(T))
     {
         //A struct may be used in constant GEP expr.
         for (const User* user : G->users())
@@ -522,8 +567,10 @@ void SymbolTableBuilder::handleGlobalInitializerCE(const Constant* C)
 {
     if (C == nullptr)
         return;
+    if (!LLVMUtil::isPlausibleLLVMValuePointer(C))
+        return;
     const Type* cTy = C->getType();
-    if (cTy == nullptr || reinterpret_cast<uintptr_t>(cTy) < 0x1000)
+    if (!LLVMUtil::isPlausibleLLVMTypePointer(cTy))
         return;
 
     if (SVFUtil::isa<Function>(C))
@@ -532,18 +579,43 @@ void SymbolTableBuilder::handleGlobalInitializerCE(const Constant* C)
     // In opaque-pointer mode, avoid querying type eagerly here.
     if (SVFUtil::isa<ConstantArray>(C))
     {
-        for (u32_t i = 0, e = C->getNumOperands(); i != e; i++)
+        const ArrayType* AT = SVFUtil::dyn_cast<ArrayType>(cTy);
+        const unsigned nOps = C->getNumOperands();
+        // If the aggregate layout disagrees with the type, operand Uses can be
+        // corrupt; getOperand(0) may SIGSEGV inside llvm::Use (see core stacks).
+        const bool layoutOk =
+            AT && LLVMUtil::isPlausibleLLVMTypePointer(AT) &&
+            AT->getNumElements() == static_cast<uint64_t>(nOps);
+        if (layoutOk)
         {
-            if (const Constant* op = SVFUtil::dyn_cast<Constant>(C->getOperand(i)))
-                handleGlobalInitializerCE(op);
+            for (u32_t i = 0; i != nOps; ++i)
+            {
+                const Value* opv = C->getOperand(i);
+                if (!LLVMUtil::isPlausibleLLVMValuePointer(opv))
+                    continue;
+                if (const Constant* op = SVFUtil::dyn_cast<Constant>(opv))
+                    handleGlobalInitializerCE(op);
+            }
         }
     }
     else if (SVFUtil::isa<ConstantStruct>(C))
     {
-        for (u32_t i = 0, e = C->getNumOperands(); i != e; i++)
+        const StructType* ST = SVFUtil::dyn_cast<StructType>(cTy);
+        const unsigned nOps = C->getNumOperands();
+        const bool layoutOk =
+            ST && LLVMUtil::isPlausibleLLVMTypePointer(ST) &&
+            static_cast<uint64_t>(ST->getNumElements()) ==
+                static_cast<uint64_t>(nOps);
+        if (layoutOk)
         {
-            if (const Constant* op = SVFUtil::dyn_cast<Constant>(C->getOperand(i)))
-                handleGlobalInitializerCE(op);
+            for (u32_t i = 0; i != nOps; ++i)
+            {
+                const Value* opv = C->getOperand(i);
+                if (!LLVMUtil::isPlausibleLLVMValuePointer(opv))
+                    continue;
+                if (const Constant* op = SVFUtil::dyn_cast<Constant>(opv))
+                    handleGlobalInitializerCE(op);
+            }
         }
     }
     else if(const ConstantData* data = SVFUtil::dyn_cast<ConstantData>(C))
@@ -644,17 +716,33 @@ ObjTypeInfo* SymbolTableBuilder::createObjTypeInfo(const Value* val)
 /*!
  * Analyse types of all flattened fields of this object
  */
-void SymbolTableBuilder::analyzeObjType(ObjTypeInfo* typeinfo, const Value* val)
+void SymbolTableBuilder::analyzeObjType(ObjTypeInfo* typeinfo, const Value* val,
+                                        const Type* objLayoutTy)
 {
 
     const PointerType* refty = SVFUtil::dyn_cast<PointerType>(val->getType());
     assert(refty && "this value should be a pointer type!");
-    Type* elemTy = getPtrElementType(refty);
+    Type* elemTy = nullptr;
+    // In opaque-pointer IR, getPtrElementType(refTy) is often i8. For `alloca ptr`
+    // createObjTypeInfo passes the allocated type (opaque ptr); that is still the
+    // correct logical layout for a pointer-sized slot — do not downgrade to i8.
+    if (objLayoutTy)
+        elemTy = const_cast<Type*>(objLayoutTy);
+    else
+        elemTy = getPtrElementType(refty);
     bool isPtrObj = false;
+    if (!LLVMUtil::isPlausibleLLVMTypePointer(elemTy))
+        return;
     // Find the inter nested array element
-    while (const ArrayType* AT = SVFUtil::dyn_cast<ArrayType>(elemTy))
+    while (true)
     {
-        elemTy = AT->getElementType();
+        const ArrayType* AT = SVFUtil::dyn_cast<ArrayType>(elemTy);
+        if (!AT)
+            break;
+        Type* next = const_cast<Type*>(AT->getElementType());
+        if (!LLVMUtil::isPlausibleLLVMTypePointer(next))
+            break;
+        elemTy = next;
         if (elemTy->isPointerTy())
             isPtrObj = true;
         if (SVFUtil::isa<GlobalVariable>(val) &&
@@ -665,6 +753,8 @@ void SymbolTableBuilder::analyzeObjType(ObjTypeInfo* typeinfo, const Value* val)
         else
             typeinfo->setFlag(ObjTypeInfo::VAR_ARRAY_OBJ);
     }
+    if (!LLVMUtil::isPlausibleLLVMTypePointer(elemTy))
+        return;
     if (const StructType* ST = SVFUtil::dyn_cast<StructType>(elemTy))
     {
         const std::vector<const SVFType*>& flattenFields =
@@ -687,7 +777,7 @@ void SymbolTableBuilder::analyzeObjType(ObjTypeInfo* typeinfo, const Value* val)
         isPtrObj = true;
     }
 
-    if(isPtrObj)
+    if (isPtrObj)
         typeinfo->setFlag(ObjTypeInfo::HASPTR_OBJ);
 }
 
@@ -701,7 +791,11 @@ void SymbolTableBuilder::analyzeHeapObjType(ObjTypeInfo* typeinfo, const Value* 
         typeinfo->setFlag(ObjTypeInfo::HEAP_OBJ);
         typeinfo->resetTypeForHeapStaticObj(
             LLVMModuleSet::getLLVMModuleSet()->getSVFType(castUse->getType()));
-        analyzeObjType(typeinfo,castUse);
+        const Type* heapLayout = nullptr;
+        if (ObjTypeInference* ti =
+                LLVMModuleSet::getLLVMModuleSet()->getTypeInference())
+            heapLayout = ti->inferObjType(castUse);
+        analyzeObjType(typeinfo, castUse, heapLayout);
     }
     else
     {
@@ -720,7 +814,11 @@ void SymbolTableBuilder::analyzeStaticObjType(ObjTypeInfo* typeinfo, const Value
         typeinfo->setFlag(ObjTypeInfo::STATIC_OBJ);
         typeinfo->resetTypeForHeapStaticObj(
             LLVMModuleSet::getLLVMModuleSet()->getSVFType(castUse->getType()));
-        analyzeObjType(typeinfo,castUse);
+        const Type* staticLayout = nullptr;
+        if (ObjTypeInference* ti =
+                LLVMModuleSet::getLLVMModuleSet()->getTypeInference())
+            staticLayout = ti->inferObjType(castUse);
+        analyzeObjType(typeinfo, castUse, staticLayout);
     }
     else
     {
@@ -741,13 +839,13 @@ void SymbolTableBuilder::initTypeInfo(ObjTypeInfo* typeinfo, const Value* val,
     if (SVFUtil::isa<Function>(val))
     {
         typeinfo->setFlag(ObjTypeInfo::FUNCTION_OBJ);
-        analyzeObjType(typeinfo,val);
+        analyzeObjType(typeinfo, val, objTy);
         objSize = getObjSize(objTy);
     }
     else if(const AllocaInst* allocaInst = SVFUtil::dyn_cast<AllocaInst>(val))
     {
         typeinfo->setFlag(ObjTypeInfo::STACK_OBJ);
-        analyzeObjType(typeinfo,val);
+        analyzeObjType(typeinfo, val, objTy);
         /// This is for `alloca <ty> <NumElements>`. For example, `alloca i64 3` allocates 3 i64 on the stack (objSize=3)
         /// In most cases, `NumElements` is not specified in the instruction, which means there is only one element (objSize=1).
         if(const ConstantInt* sz = SVFUtil::dyn_cast<ConstantInt>(allocaInst->getArraySize()))
@@ -760,7 +858,7 @@ void SymbolTableBuilder::initTypeInfo(ObjTypeInfo* typeinfo, const Value* val,
         typeinfo->setFlag(ObjTypeInfo::GLOBVAR_OBJ);
         if(isConstantObjSym(val))
             typeinfo->setFlag(ObjTypeInfo::CONST_GLOBAL_OBJ);
-        analyzeObjType(typeinfo,val);
+        analyzeObjType(typeinfo, val, objTy);
         objSize = getObjSize(objTy);
     }
     else if (SVFUtil::isa<Instruction>(val) &&

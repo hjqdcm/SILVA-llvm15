@@ -29,10 +29,79 @@
 
 #include "SVF-LLVM/LLVMUtil.h"
 #include "SVFIR/SymbolTableInfo.h"
+#include <llvm/ADT/SmallPtrSet.h>
 #include <sstream>
 #include <llvm/Support/raw_ostream.h>
 
 using namespace SVF;
+
+namespace
+{
+
+/// @llvm.global.annotations entries use a pointer to the annotated Function in
+/// operand 0, often behind bitcast/addrspacecast (opaque pointers). If we only
+/// peel a single bitcast, we can keep entries that still reference removed
+/// functions; eraseFromParent then frees the Function while the global array
+/// still holds dangling ConstantExprs → ASan heap-use-after-free in
+/// getFunAnnotations.
+Function* getAnnotatedFunctionFromAnnotationStruct(ConstantStruct* structAn)
+{
+    if (structAn == nullptr || structAn->getNumOperands() < 1)
+        return nullptr;
+    const unsigned maxPeel = 32;
+    Value* root = structAn->getOperand(0);
+    for (unsigned p = 0; p < maxPeel; ++p)
+    {
+        if (Function* F = SVFUtil::dyn_cast<Function>(root))
+            return F;
+        if (GlobalAlias* ga = SVFUtil::dyn_cast<GlobalAlias>(root))
+        {
+            root = ga->getAliasee();
+            continue;
+        }
+        ConstantExpr* ce = SVFUtil::dyn_cast<ConstantExpr>(root);
+        if (ce == nullptr)
+            return nullptr;
+        switch (ce->getOpcode())
+        {
+        case Instruction::BitCast:
+        case Instruction::AddrSpaceCast:
+            root = ce->getOperand(0);
+            break;
+        default:
+            return nullptr;
+        }
+    }
+    return nullptr;
+}
+
+/// True if any nested Constant references a function in \p removed (including
+/// through GlobalAlias / ConstantExpr operands). Used when operand 0 does not
+/// peel to a plain Function* so we still drop entries that would dangle after
+/// eraseFromParent.
+bool annotationConstantReferencesRemoved(
+    const Constant* C,
+    const std::vector<Function*>& removed,
+    llvm::SmallPtrSet<const Constant*, 32>& visited)
+{
+    if (C == nullptr)
+        return false;
+    if (const Function* F = SVFUtil::dyn_cast<Function>(C))
+        return std::find(removed.begin(), removed.end(), F) != removed.end();
+    if (!visited.insert(C).second)
+        return false;
+    if (const GlobalAlias* ga = SVFUtil::dyn_cast<GlobalAlias>(C))
+        return annotationConstantReferencesRemoved(ga->getAliasee(), removed, visited);
+    for (const Use& U : C->operands())
+    {
+        const Constant* op = SVFUtil::dyn_cast<Constant>(U.get());
+        if (op != nullptr && annotationConstantReferencesRemoved(op, removed, visited))
+            return true;
+    }
+    return false;
+}
+
+} // namespace
 
 // label for global vtbl value before demangle
 const std::string vtblLabelBeforeDemangle = "_ZTV";
@@ -467,9 +536,7 @@ std::vector<std::string> LLVMUtil::getFunAnnotations(const Function* fun)
         if (structAn->getNumOperands() < 2)
             continue;
 
-        Value* op0Val = structAn->op_begin()[0].get();
-        ConstantExpr *expr = SVFUtil::dyn_cast<ConstantExpr>(op0Val);
-        if (expr == nullptr || expr->getOpcode() != Instruction::BitCast || expr->getOperand(0) != fun)
+        if (getAnnotatedFunctionFromAnnotationStruct(structAn) != fun)
             continue;
 
         Value* op1Val = structAn->op_begin()[1].get();
@@ -513,17 +580,19 @@ void LLVMUtil::removeFunAnnotations(std::vector<Function*>& removedFuncList)
         if (structAn == nullptr)
             continue;
 
-        ConstantExpr* expr = SVFUtil::dyn_cast<ConstantExpr>(structAn->getOperand(0));
-        if (expr == nullptr || expr->getOpcode() != Instruction::BitCast)
+        Function* annotatedFunc = getAnnotatedFunctionFromAnnotationStruct(structAn);
+        if (annotatedFunc != nullptr)
         {
-            // Keep the annotation if it's not created using BitCast
-            newAnnotations.push_back(structAn);
-            continue;
+            if (std::find(removedFuncList.begin(), removedFuncList.end(), annotatedFunc) !=
+                removedFuncList.end())
+                continue;
         }
-
-        Function* annotatedFunc = SVFUtil::dyn_cast<Function>(expr->getOperand(0));
-        if (annotatedFunc == nullptr || std::find(removedFuncList.begin(), removedFuncList.end(), annotatedFunc) != removedFuncList.end())
-            continue;
+        else
+        {
+            llvm::SmallPtrSet<const Constant*, 32> seen;
+            if (annotationConstantReferencesRemoved(structAn, removedFuncList, seen))
+                continue;
+        }
 
         // Keep the annotation for all other functions
         newAnnotations.push_back(structAn);
@@ -1217,7 +1286,13 @@ std::string SVFValue::toString() const
     {
         auto llvmVal = LLVMModuleSet::getLLVMModuleSet()->getLLVMValue(this);
         if (llvmVal)
-            rawstr << " " << *llvmVal << " ";
+        {
+            // Avoid Value::print via operator<<: full IR printing uses ModuleSlotTracker and can
+            // segfault on LLVM 15+ (e.g. DOT/SVFG dump after incremental transforms).
+            rawstr << " ";
+            llvmVal->printAsOperand(rawstr, false);
+            rawstr << " ";
+        }
         else
             rawstr << " No llvmVal found";
     }

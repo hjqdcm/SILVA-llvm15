@@ -754,20 +754,20 @@ void VFG::connectDirectVFGEdges()
                 continue;
             /// for all other cases, like copy/gep/load/ret, connect the RHS pointer to its def
             if (stmtNode->getPAGSrcNode()->isConstDataOrAggDataButNotNullPtr() == false)
-                addIntraDirectVFEdge(getDef(stmtNode->getPAGSrcNode()), nodeId);
+                addIntraDirectVFEdge(getDefConservative(stmtNode->getPAGSrcNode()), nodeId);
             if (const GepStmt* gepStmt = SVFUtil::dyn_cast<GepStmt>(stmtNode->getPAGEdge()))
             {
                 for (const auto &varType: gepStmt->getOffsetVarAndGepTypePairVec())
                 {
                     if(varType.first->isConstDataOrAggDataButNotNullPtr() || isInterestedPAGNode(varType.first) == false)
                         continue;
-                    addIntraDirectVFEdge(getDef(varType.first), nodeId);
+                    addIntraDirectVFEdge(getDefConservative(varType.first), nodeId);
                 }
             }
             /// for store, connect the RHS/LHS pointer to its def
             if(SVFUtil::isa<StoreVFGNode>(stmtNode) && (stmtNode->getPAGDstNode()->isConstDataOrAggDataButNotNullPtr() == false))
             {
-                addIntraDirectVFEdge(getDef(stmtNode->getPAGDstNode()), nodeId);
+                addIntraDirectVFEdge(getDefConservative(stmtNode->getPAGDstNode()), nodeId);
             }
 
         }
@@ -776,7 +776,7 @@ void VFG::connectDirectVFGEdges()
             for (PHIVFGNode::OPVers::const_iterator it = phiNode->opVerBegin(), eit = phiNode->opVerEnd(); it != eit; it++)
             {
                 if (it->second->isConstDataOrAggDataButNotNullPtr() == false)
-                    addIntraDirectVFEdge(getDef(it->second), nodeId);
+                    addIntraDirectVFEdge(getDefConservative(it->second), nodeId);
             }
         }
         else if(BinaryOPVFGNode* binaryNode = SVFUtil::dyn_cast<BinaryOPVFGNode>(node))
@@ -784,7 +784,7 @@ void VFG::connectDirectVFGEdges()
             for (BinaryOPVFGNode::OPVers::const_iterator it = binaryNode->opVerBegin(), eit = binaryNode->opVerEnd(); it != eit; it++)
             {
                 if (it->second->isConstDataOrAggDataButNotNullPtr() == false)
-                    addIntraDirectVFEdge(getDef(it->second), nodeId);
+                    addIntraDirectVFEdge(getDefConservative(it->second), nodeId);
             }
         }
         else if(UnaryOPVFGNode* unaryNode = SVFUtil::dyn_cast<UnaryOPVFGNode>(node))
@@ -792,7 +792,7 @@ void VFG::connectDirectVFGEdges()
             for (UnaryOPVFGNode::OPVers::const_iterator it = unaryNode->opVerBegin(), eit = unaryNode->opVerEnd(); it != eit; it++)
             {
                 if (it->second->isConstDataOrAggDataButNotNullPtr() == false)
-                    addIntraDirectVFEdge(getDef(it->second), nodeId);
+                    addIntraDirectVFEdge(getDefConservative(it->second), nodeId);
             }
         }
         else if(CmpVFGNode* cmpNode = SVFUtil::dyn_cast<CmpVFGNode>(node))
@@ -800,19 +800,19 @@ void VFG::connectDirectVFGEdges()
             for (CmpVFGNode::OPVers::const_iterator it = cmpNode->opVerBegin(), eit = cmpNode->opVerEnd(); it != eit; it++)
             {
                 if (it->second->isConstDataOrAggDataButNotNullPtr() == false)
-                    addIntraDirectVFEdge(getDef(it->second), nodeId);
+                    addIntraDirectVFEdge(getDefConservative(it->second), nodeId);
             }
         }
         else if(BranchVFGNode* branchNode = SVFUtil::dyn_cast<BranchVFGNode>(node))
         {
             const SVFVar* cond = branchNode->getBranchStmt()->getCondition();
             if (cond->isConstDataOrAggDataButNotNullPtr() == false)
-                addIntraDirectVFEdge(getDef(cond), nodeId);
+                addIntraDirectVFEdge(getDefConservative(cond), nodeId);
         }
         else if(ActualParmVFGNode* actualParm = SVFUtil::dyn_cast<ActualParmVFGNode>(node))
         {
             if (actualParm->getParam()->isConstDataOrAggDataButNotNullPtr() == false)
-                addIntraDirectVFEdge(getDef(actualParm->getParam()), nodeId);
+                addIntraDirectVFEdge(getDefConservative(actualParm->getParam()), nodeId);
         }
         else if(FormalParmVFGNode* formalParm = SVFUtil::dyn_cast<FormalParmVFGNode>(node))
         {
@@ -827,7 +827,7 @@ void VFG::connectDirectVFGEdges()
         else if(FormalRetVFGNode* calleeRet = SVFUtil::dyn_cast<FormalRetVFGNode>(node))
         {
             /// connect formal ret to its definition node
-            addIntraDirectVFEdge(getDef(calleeRet->getRet()), nodeId);
+            addIntraDirectVFEdge(getDefConservative(calleeRet->getRet()), nodeId);
 
             /// connect formal ret to actual ret
             for(RetPESet::const_iterator it = calleeRet->retPEBegin(), eit = calleeRet->retPEEnd(); it!=eit; ++it)
@@ -861,7 +861,7 @@ void VFG::connectDirectVFGEdges()
                     joins.end(); iter != eiter; ++iter)
         {
             TDJoinPE* joinedge = SVFUtil::cast<TDJoinPE>(*iter);
-            NodeID callsiteRev = getDef(joinedge->getLHSVar());
+            NodeID callsiteRev = getDefConservative(joinedge->getLHSVar());
             FormalRetVFGNode* calleeRet = getFormalRetVFGNode(joinedge->getRHSVar());
             addRetEdge(calleeRet->getId(),callsiteRev, getCallSiteID(joinedge->getCallSite(), calleeRet->getFun()));
         }

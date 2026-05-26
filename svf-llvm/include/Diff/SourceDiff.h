@@ -58,10 +58,22 @@ private:
 
         auto getRootDir = [](string dir, string& root) -> void
         {
-            if(dir[dir.length()-1] == '/')
+            /*if(dir[dir.length()-1] == '/')
             dir = dir.substr(0, dir.length()-1);
             int pos = dir.find_last_of("/");
-            root = dir.substr(pos);
+            root = dir.substr(pos);*/
+            root.clear();
+            if (dir.empty())
+                return;
+            while (!dir.empty() && (dir.back() == '/' || dir.back() == '\\'))
+                dir.pop_back();
+            if (dir.empty())
+                return;
+            size_t pos = dir.find_last_of("/\\");
+            if (pos == string::npos)
+                root = dir;
+            else
+                root = dir.substr(pos);
         };
 
         getRootDir(beforeDir, beforeRootDir);

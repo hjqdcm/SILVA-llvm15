@@ -87,7 +87,8 @@ protected:
     /// Initialize TypeInfo based on LLVM Value
     void initTypeInfo(ObjTypeInfo* typeinfo, const Value* value, const Type* ty);
     /// Analyse types of all flattened fields of this object
-    void analyzeObjType(ObjTypeInfo* typeinfo, const Value* val);
+    void analyzeObjType(ObjTypeInfo* typeinfo, const Value* val,
+                        const Type* objLayoutTy = nullptr);
     /// Analyse types of heap and static objects
     void analyzeHeapObjType(ObjTypeInfo* typeinfo, const Value* val);
     /// Analyse types of heap and static objects
